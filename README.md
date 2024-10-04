@@ -1,6 +1,6 @@
 # AqMetalSubsidy_Urban-Forested
 
-This repository contains code developed for a manuscript currently in review for publication in Freshwater Science. 
+This repository contains code developed for a manuscript currently in review for potential publication in Freshwater Science. 
 
 Given that the data is not currently published, we only provide code and not the raw data. Once the manuscript is accepted for publication, we will add the raw data.
 
