@@ -1,0 +1,184 @@
+---
+title: "Data-Processing_Float-Trap-Data"
+author: "Jonny Behrens"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# Overview
+
+Floating emergence traps were deployed (~9 per site) in Ellerbe Creek and 
+New Hope Creek in 2021 and 2022. This code cleans field data for analysis.
+
+# Section 1: Set Up Environment
+
+```{r setup, echo = FALSE, warning= FALSE, message=FALSE, results='hide'}
+# Set working directory. Place the .here file in the desired working directory
+knitr::opts_knit$set(root.dir = here::here())
+
+# Some knit settings 
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+
+# Clear environment
+rm(list = ls())
+
+# Load libraries
+library(pacman)
+p_load(openxlsx,knitr,DT, tidyverse)
+```
+
+# Section 2: Download and Clean Data
+
+## Meta data
+
+```{r}
+trap_count<-read.csv("data_meta/meta_float-trap-count.csv") %>% 
+  mutate(Collect.Date = as.Date(Collect.Date, tryFormats = c("%m/%d/%Y")))
+
+float_meta_data<-read.csv("data_meta/meta_float-trap-deployment-schedule.csv") %>% 
+  mutate(Collect.Date = as.Date(Date_Collected, tryFormats = "%m/%d/%Y")) %>% 
+  dplyr::select(Collect.Date, Days_Deployed) %>% 
+  filter(!is.na(Collect.Date))
+```
+
+Standard error is calculated for each Order of taxa at a given site and date.
+This will subsequently be propagated (e.g., to families within order).
+
+```{r}
+families<-data.frame(EPTDO = c("E", "P", "T", "D", "O", "OR", "SO", "L", "R"), 
+                     Order = c("ephemeroptera", "plecoptera", "trichoptera", 
+                               "diptera", "other", "odonata",
+                               "other", "other", "other"))
+```
+
+```{r}
+std.error <- function(x) sd(x)/sqrt(length(x))
+
+Emergence_FLOAT_Trap_Datav2 <- read.xlsx("data_raw/Bio/9-28-23_EC_Emergence_FLOAT_Trap_Datav2.xlsx") %>% 
+  mutate(Collect.Date = as.Date(Collect.Date, origin = "1899-12-30"))
+
+Emergence_Stats_EPTDO<- Emergence_FLOAT_Trap_Datav2 %>% 
+  summarize(Total_mass_EPTDO = sum(Sample.Mass, na.rm = T),
+            .by = c("Collect.Date", "Site", "EPTDO", "Float")) %>% 
+  mutate(mean_EPTDO = mean(Total_mass_EPTDO),
+         SE_EPTDO = std.error(Total_mass_EPTDO),
+         n_EPTDO = n(),
+         totalmass_EPTDO = sum(Total_mass_EPTDO), 
+         SE_totalmass_EPTDO = n_EPTDO*SE_EPTDO,
+         SE_percent_of_mass = round(SE_EPTDO/mean_EPTDO, 4), 
+         .by = c("Collect.Date", "Site", "EPTDO")) %>% 
+  mutate(SE_bigger_mean = if_else(SE_EPTDO >= mean_EPTDO, "Y", "N")) %>% 
+  # we will conservatively call SE 100% of mean when there is only one observation
+  mutate(SE_percent_of_mass = if_else(is.na(SE_percent_of_mass), 1, SE_percent_of_mass)) %>% 
+  full_join(families)
+
+results <- Emergence_Stats_EPTDO %>%
+  filter(n_EPTDO > 2) %>% 
+  mutate(t_test = list(t.test(Total_mass_EPTDO)),
+         .by = c("Collect.Date", "Site", "EPTDO")) %>% 
+  mutate(conf_int = map(t_test, ~ .$conf.int)) %>% 
+  filter(map_lgl(conf_int, ~ !is.null(.x))) %>% 
+  mutate(column1 = map_chr(conf_int, 1),
+         column2 = map_chr(conf_int, 2)) %>% 
+  select(-t_test, -conf_int)
+```
+
+## Biota data
+
+Step 1: AFDM.mg is the total emergent biomass (AFDM) across all deployed traps
+on a given date at a given site. For some sites, there were fewer than 9 traps 
+(e.g., due to loss of a trap). Thus, divide first by n_traps*Day_Deployed to 
+get a daily rate for each trap. Next, multiply by 3 since a traps is 1/3 of a m3.
+The end results is a mg AFDM / m2 day rate.
+
+Step 2: Calculate total mass emerging from a site on a given day by taxa, site, date.
+
+Step 3: Same as step 2, but for each date (not taxa).
+
+```{r}
+Float_data_raw<-read.csv("data_raw/raw_Float_Biomass_3-6-24.csv") %>% 
+  mutate(Collect.Date = as.Date(Collect.Date, tryFormats = c("%m/%d/%Y"))) %>% 
+  full_join(trap_count) %>% 
+  mutate(across(Order:Order_Family, tolower)) %>% 
+  full_join(float_meta_data) %>% 
+  left_join(select(Emergence_Stats_EPTDO, 
+                   c(Collect.Date, Site, Order, SE_percent_of_mass)))
+
+Float_data<-Float_data_raw %>% 
+  # Step 1
+  mutate(E_AFDM_mgperm2 = (AFDM.mg/(n_traps*Days_Deployed))*3,
+         E_AFDM_mgperm2_SE = E_AFDM_mgperm2*SE_percent_of_mass) %>% 
+  # Step 2
+  mutate(FamilySite_E_AFDM_mgperm2 = sum(E_AFDM_mgperm2),
+         FamilySite_E_AFDM_mgperm2_SE = sum(E_AFDM_mgperm2_SE),
+         .by = c("Collect.Date", "Site", "Family")) %>% 
+  # Step 3
+  mutate(Site_E_AFDM_mgperm2 = sum(E_AFDM_mgperm2), 
+         Site_E_AFDM_mgperm2_SE = sum(E_AFDM_mgperm2_SE),
+         .by = c("Collect.Date", "Site")) %>% 
+  # add season
+  mutate(Month = month(Collect.Date),
+         Season = if_else(Month %in% c(12,1,2), "Winter",
+                  if_else(Month %in% c(3,4,5), "Spring",
+                  if_else(Month %in% c(6,7,8), "Summer",
+                  if_else(Month %in% c(9,10,11), "Fall", NA_character_)))),
+                  .after=Month) %>% 
+  # fix site names
+  mutate(Site = case_when(Site == "NHC" ~ "forested",
+                          Site == "ECGS" ~ "wastewater dominated",
+                          Site == "ECNG" ~ "stormwater dominated"))
+
+Taxa<-distinct(Float_data, Order, Family)
+```
+
+## Annual Flux - Imputed
+
+```{r}
+# Set the start and end dates
+start_date <- as.Date("2021-04-15")
+end_date <- as.Date("2022-04-16")
+```
+
+```{r}
+# Create datasets to fill gaps (next section)
+days <- seq(start_date, end_date, by = "1 day")
+
+float_taxa_sampledates<-expand.grid(Site = unique(Float_data$Site),
+                                    Order_Family = unique(Float_data$Order_Family),
+                                    Collect.Date = unique(Float_data$Collect.Date)) %>% 
+  filter(!is.na(Collect.Date)) %>% 
+  mutate(Order = str_extract(Order_Family, "[:alpha:]+"))
+  
+float_time_series<-expand.grid(Site = unique(Float_data$Site),
+                               Order_Family = unique(Float_data$Order_Family),
+                               Collect.Date = days)  %>% 
+  mutate(Order = str_extract(Order_Family, "[:alpha:]+"))
+```
+
+```{r}
+tree_data_emerge<-Float_data %>%
+  filter(!is.na(Site)) %>% 
+  distinct(Site, Order, Order_Family, Collect.Date, 
+           FamilySite_E_AFDM_mgperm2,FamilySite_E_AFDM_mgperm2_SE) %>% 
+  # Fill in zeros for each sampling dates
+  full_join(float_taxa_sampledates) %>% 
+  mutate(FamilySite_E_AFDM_mgperm2 = if_else(is.na(FamilySite_E_AFDM_mgperm2), 
+                                                0, FamilySite_E_AFDM_mgperm2),
+         FamilySite_E_AFDM_mgperm2_SE = if_else(is.na(FamilySite_E_AFDM_mgperm2_SE), 
+                                                0, FamilySite_E_AFDM_mgperm2_SE)) %>% 
+  # Add empty rows for all missing days
+  full_join(float_time_series) %>%
+  # Impute to estimate annual flux
+  arrange(Site, Order_Family, Collect.Date) %>% 
+  group_by(Site, Order_Family) %>% 
+  mutate(imputed_data = imputeTS::na_interpolation(FamilySite_E_AFDM_mgperm2, option = "linear"),
+         imputed_data_SE = imputeTS::na_interpolation(FamilySite_E_AFDM_mgperm2_SE, option = "linear")) %>% 
+  ungroup()
+```
+
+# Section 3: Save Data
+
+```{r echo = T}
+write.csv(Float_data, "data_processed/Emergence_Float_DryAquaticInsects_8-13-24.csv")
+write.csv(tree_data_emerge, "data_processed/Tree-Data-Emergence_8-13-24.csv")
+```

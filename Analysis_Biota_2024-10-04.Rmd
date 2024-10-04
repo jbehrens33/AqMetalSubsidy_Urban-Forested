@@ -1,0 +1,1305 @@
+---
+title: "Analysis of Biota for Metals"
+author: "Jonny Behrens"
+date: "`r Sys.Date()`"
+output:
+  html_document: default
+---
+
+# Set-Up
+
+Code to set-up R environment.
+
+```{r setup, echo = FALSE, warning= FALSE, message=FALSE, results='hide'}
+# Set working directory. Ensure the .here file is stored in desired working directory
+knitr::opts_knit$set(root.dir = here::here())
+
+# Some knit settings 
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+
+# Clear environment
+rm(list = ls())
+
+# Libraries
+library(pacman)
+p_load(openxlsx, scales, ggpubr, fmsb, ggpmisc, multcompView, DT,
+       imputeTS, data.table, tidyverse)
+```
+
+## Important Definitions
+
+```{r}
+sites<-c('Stormwater', 'Wastewater', 'Forested') 
+metals_for_full_analysis<-c("Zn", "Cu", "Se", "Cr", "Pb", "Ni")
+
+short_names<-data.frame(Short_Order_Family = c("D_chir", "D_emp", "D_tip", "D_sim", "E_bae", "E_hep",
+                                               "E_eph","E_iso", "O_coe", "P_per", "T_hydsc", 
+                                               "T_hydrp", "T_phi"),
+                        Order_Family = c("diptera_chironomidae", "diptera_empididae",
+                                         "diptera_tipulidae/limoniidae", "diptera_simuliidae",
+                                         "ephemeroptera_baetidae", "ephemeroptera_heptageniidae",
+                                         "ephemeroptera_ephemerellidae", "ephemeroptera_isonychiidae",
+                                         "odonata_coenagrionidae", "plecoptera_perlidae",
+                                         "trichoptera_hydropsychidae", "trichoptera_hydroptilidae",
+                                         "trichoptera_philopotamidae")) 
+
+start_date<-as.Date("2021-04-15")
+end_date<-as.Date("2022-04-16")
+
+std.error <- function(x) sd(x)/sqrt(length(x))
+```
+
+## Palettes
+
+```{r}
+pal_sites<-c('#f7b482', '#50a2c9', '#007100')
+names(pal_sites) <-  sites
+
+pal_metals<-c("darkgrey", "#56B4E9", "#E69F00", "#009E73","#0072B2", 
+              "#D55E00","#CC79A7")
+metals_for_full_analysis<-c("Zn", "Cu", "Se", "Cr", "Pb", "Ni")
+names(pal_metals)<-metals_for_full_analysis
+
+start_date<-as.Date("2021-04-15")
+end_date<-as.Date("2022-04-16")
+```
+
+```{r}
+taxa_colors_dataset<-c("coleoptera_elmidae"="#86592d", "coleoptera_psephenidae" = "#d2a679", 
+                       "diptera_chironomidae"="#c30010", "diptera_empididae" = "#de0a26",  
+                       "diptera_tipulidae/limoniidae" = "#ee6b6e",
+                       "diptera_limoniidae" = "#ff2c2c", "diptera_simuliidae" = "#ff2c2c",   
+                       "diptera_tipulidae"="#e18485", "ephemeroptera_baetidae"="#0000cc",
+                       "ephemeroptera_leptohyphidae" = "#b3b3ff", "ephemeroptera_heptageniidae"="#8080ff",
+                       "ephemeroptera_ephemerellidae" = "#4d4dff", "ephemeroptera_isonychiidae"="#000099",
+                       "megaloptera_corydalidae" = "#eaea2c", "odonata_gomphidae"="#F781BF",
+                       "odonata_coenagrionidae" = "#fab7db", 
+                       "oligochaeta_unknown"="darkgrey", "plecoptera_perlidae"="#ff9933", 
+                       "plecoptera_capniidae" = "#ffbf80", "plecoptera_taeniopterygidae" = "#e67300", 
+                       "trichoptera_hydropsychidae"="#3a7f38","trichoptera_hydroptilidae"="#6bef67",
+                       "trichoptera_philopotamidae"="#4DAF4A")
+
+short_names_pal<-c("D_chir"="#c30010", "D_emp" = "#de0a26", "D_tip"= "#ee6b6e", "D_sim" = "#ff2c2c", 
+                   "E_bae"="#0000cc", "E_hep"="#8080ff", "E_eph"= "#4d4dff","E_iso"="#000099", 
+                   "O_coe"= "#fab7db", "P_per"="#ff9933", "T_hydsc"="#3a7f38", 
+                                               "T_hydrp"="#6bef67", "T_phi"="#4DAF4A")
+
+short_taxa_pal<-as.data.frame(taxa_colors_dataset) %>%
+  rownames_to_column(var = "Order_Family") %>% 
+  full_join(short_names) %>% 
+  filter(!is.na(Short_Order_Family)) %>% 
+  select(Short_Order_Family, 2)
+```
+
+# Download Data
+
+## Biomass
+
+```{r biomass}
+tree_data_emerge<-read.csv("data_processed/Tree-Data-Emergence_8-13-24.csv") %>% 
+  select(-X) %>% 
+  mutate(date = as.Date(Collect.Date), .keep = "unused") %>% 
+  mutate(SITE = case_when(Site == "wastewater dominated" ~ "Wastewater", 
+                          Site == "stormwater dominated" ~ "Stormwater",
+                          Site == "forested" ~ "Forested")) %>% 
+  mutate(SITE = factor(SITE, c("Stormwater", "Wastewater", "Forested")))
+```
+
+```{r sizecount}
+Float_data<-read.csv("data_processed/Emergence_Float_DryAquaticInsects_8-13-24.csv") %>% 
+  mutate(date = as.Date(Collect.Date), .after = 2, .keep = "unused") %>% 
+  mutate(Site = case_when(Site == "wastewater dominated" ~ "Wastewater", 
+                          Site == "stormwater dominated" ~ "Stormwater",
+                          Site == "forested" ~ "Forested"))
+```
+
+## Metals
+
+```{r metals}
+data_ZeroasND_samples<-read_csv("data_processed/JBehrens_MetalsDataBiota_ND0_2024-08-18.csv") %>%
+  rename(SITE = Site) %>% 
+  mutate(SITE = factor(SITE, c("Stormwater", "Wastewater", "Forested"))) %>% 
+  mutate(Order_Family = tolower(paste(Type_Specimen, Specimen, sep = "_")), 
+         .after = "Specimen")
+```
+
+```{r}
+data_HalfND_samples<-read_csv("data_processed/JBehrens_MetalsDataBiota_NDHD_2024-08-18.csv") %>%
+  rename(SITE = Site) %>% 
+  mutate(SITE = factor(SITE, c("Stormwater", "Wastewater", "Forested"))) %>% 
+  mutate(Order_Family = tolower(paste(Type_Specimen, Specimen, sep = "_")), 
+         .after = "Specimen")
+```
+
+## Water
+
+```{r}
+Water_Conc<-read_csv("data_processed/JBehrens_MetalsDataWater_2024-08-18.csv") %>%
+  rename(SITE = Site, DATE = date) %>% 
+  mutate(SITE = factor(SITE, c("Stormwater", "Wastewater","Forested")))
+
+```
+
+# Detection & Quantification Limit
+
+## Insects 
+
+```{r}
+data_HalfND_samples %>%
+  # filter for only the insects
+  filter(!str_detect(Specimen, "biofilm|Tetra")) %>% 
+  summarize(min = round(min(Concentration_mgperkg_NonDetect_as_HalfMQL),2),
+            max = round(max(Concentration_mgperkg_NonDetect_as_HalfMQL),2),
+            .by = c("SITE", "Analyte_Short"))%>% 
+  arrange(SITE, Analyte_Short) %>% 
+  datatable()
+```
+
+## Food Resources
+
+```{r}
+data_HalfND_samples %>%
+  filter(str_detect(Type_Specimen, "iofilm|oot")) %>% 
+  summarize(min = round(min(Concentration_mgperkg_NonDetect_as_HalfMQL),2),
+            max = round(max(Concentration_mgperkg_NonDetect_as_HalfMQL),2),
+            .by = c("SITE", "Analyte_Short", "Type_Specimen"))%>% 
+  arrange(Type_Specimen, SITE, Analyte_Short) %>% 
+  datatable()
+```
+
+```{r}
+detection_by_taxa<-data_HalfND_samples %>% 
+  # filter for only the insects
+  filter(!str_detect(Specimen, "biofilm|Tetra")) %>% 
+  summarize(biota_quant_min = min(Concentration_mgperkg_NonDetect_as_HalfMQL), 
+            max = max(Concentration_mgperkg_NonDetect_as_HalfMQL),
+            mean = mean(Concentration_mgperkg_NonDetect_as_HalfMQL), 
+            .by = c("SITE", "Analyte_Short", "Quantification"))
+
+# Find lowest detection limit for each compound, by site
+# Note that some compounds are not included, since all samples were above detection (Zn)
+DL_lowest<-detection_by_taxa %>% 
+  filter(Quantification == "Below Quant") %>% 
+  select(SITE, Analyte_Short, biota_quant_min) 
+  
+```
+
+# Data Cleaning
+
+## A. Concentration, by month/site/taxa
+
+```{r}
+monthly_NDHD<-data_ZeroasND_samples %>%
+  # filter for only the insects
+  filter(!str_detect(Specimen, "biofilm|Tetra")) %>% 
+  # Now let's replace 0s with the lowest site concentration for each metal
+  left_join(DL_lowest) %>%  
+  mutate(FinalConc_NDHD = if_else(Concentration_mgperkg_NonDetect_as_0 > 0, 
+                                  Concentration_mgperkg_NonDetect_as_0, biota_quant_min)) %>% 
+  select(-biota_quant_min)
+
+nondetects<-monthly_NDHD %>% 
+  count(SITE, date, Order_Family, Quantification, Analyte_Short) %>% 
+  pivot_wider(names_from = "Quantification", values_from = "n") %>% 
+  mutate(Detection = if_else(is.na(`Above Quant`), "Below", "Above")) %>% 
+  select(SITE, date, Order_Family, Analyte_Short, Detection)
+
+monthly_ave_NDHD<-monthly_NDHD %>%
+  # average across duplicate or triplicate samples
+  summarize(Conc_NDHD_average = mean(FinalConc_NDHD),
+            .by = c("SITE", "date", "Order_Family", "Analyte_Short")) %>% 
+  full_join(nondetects)
+```
+
+```{r}
+#widen
+monthly_NDHD_wide<-monthly_NDHD %>% 
+  select(SITE, date, Order_Family, Sample_Amount_mg, 
+         Analyte_Short, FinalConc_NDHD) %>% 
+  pivot_wider(names_from = "Analyte_Short", values_from = "FinalConc_NDHD") %>% 
+  full_join(filter(tree_data_emerge, !is.na(FamilySite_E_AFDM_mgperm2))) %>% 
+  arrange(Site, Order_Family, date)
+
+monthly_ave_NDHD_wide<-monthly_ave_NDHD %>% 
+  select(SITE, date, Order_Family, 
+         Analyte_Short, Conc_NDHD_average) %>% 
+  pivot_wider(names_from = "Analyte_Short", values_from = "Conc_NDHD_average") %>% 
+  full_join(filter(tree_data_emerge, !is.na(FamilySite_E_AFDM_mgperm2))) %>% 
+  arrange(Site, Order_Family, date)
+```
+
+## B. Ave by site/taxa
+
+```{r}
+Metal_BiotaSite_Average_raw<-monthly_ave_NDHD_wide %>% 
+  filter(FamilySite_E_AFDM_mgperm2 > 0) %>%
+  pivot_longer(names_to = "Analyte_Short", values_to = "Concentration", metals_for_full_analysis) %>% 
+  mutate(across(everything(), ~replace(., . ==  0 , NA))) %>% 
+  summarize(mean = mean(Concentration, na.rm = T), 
+            .by = c("SITE", "Order_Family", "Analyte_Short")) %>%
+  replace(is.na(.), 0) %>% 
+  pivot_wider(names_from = "Analyte_Short", values_from = "mean") 
+
+Metal_BiotaSite_Average_subset<-Metal_BiotaSite_Average_raw %>% 
+  filter(str_detect(Order_Family, "chiron")) %>% 
+  filter(str_detect(SITE, "torm|orest")) %>% 
+  # two taxa we didn't run for metals, so we will assume a similar loading to their site's chironomidae
+  mutate(Order_Family = case_when(str_detect(SITE, "orest") ~ "diptera_simuliidae",
+                                  str_detect(SITE, "torm") ~ "diptera_tipulidae/limoniidae"))
+  
+Metal_BiotaSite_Average<-Metal_BiotaSite_Average_raw %>% 
+  bind_rows(Metal_BiotaSite_Average_subset) %>% 
+  filter(!is.na(`Zn`)) %>%  
+  pivot_longer(names_to = "Analyte_Short", values_to = "Concentration_average",
+               metals_for_full_analysis) %>% 
+  filter(Concentration_average >0)
+  
+rm(Metal_BiotaSite_Average_raw, Metal_BiotaSite_Average_subset)
+```
+
+## C. Gap filled concentrations
+
+A note on units. The concentration of metals in biota is in mg/kg (or ug/g). The AFDM is in mg.
+
+Thus, when we multiply concentration*mass/1000 (to get flux of metals), we get units of ug.
+
+```{r}
+expanded<-expand.grid(Order_Family = unique(tree_data_emerge$Order_Family),
+                      Site = unique(tree_data_emerge$Site),
+                      Analyte_Short = unique(monthly_ave_NDHD$Analyte_Short)) %>% 
+  full_join(tree_data_emerge)
+
+monthly_AveConc_Final_NDHD<-expanded %>% 
+  filter(FamilySite_E_AFDM_mgperm2 > 0) %>%
+  full_join(monthly_ave_NDHD) %>% 
+  full_join(Metal_BiotaSite_Average) %>% 
+  mutate(FinalConc_NDHD_average = if_else(is.na(Conc_NDHD_average), 
+                                          Concentration_average, Conc_NDHD_average), 
+         .keep = "unused") %>% 
+  mutate(Monthly_Loading_TaxaSite_ug = FinalConc_NDHD_average*FamilySite_E_AFDM_mgperm2/1000,
+         Monthly_Loading_TaxaSite_ug_SE = FinalConc_NDHD_average*FamilySite_E_AFDM_mgperm2_SE/1000)
+
+```
+
+```{r}
+AnnualFlux_Dataset_Gapfilled<-monthly_AveConc_Final_NDHD %>% 
+  distinct(Site, Order_Family, date, Analyte_Short, Monthly_Loading_TaxaSite_ug) %>% 
+  pivot_wider(names_from = "Analyte_Short", values_from = "Monthly_Loading_TaxaSite_ug") %>% 
+  full_join(select(tree_data_emerge, -c(Order, imputed_data_SE, FamilySite_E_AFDM_mgperm2_SE))) %>% 
+  rename(imputed_AFDM_mgperm2 = imputed_data) %>%
+  arrange(Site, Order_Family, date) %>%
+  filter(!is.na(imputed_AFDM_mgperm2)) %>% 
+  mutate(across(metals_for_full_analysis, ~ ifelse(FamilySite_E_AFDM_mgperm2 == 0, 0, .)),
+         across(metals_for_full_analysis, ~ na_interpolation(.x, option="linear")),
+         Sampling_Date_TF = if_else(is.na(FamilySite_E_AFDM_mgperm2), "No", "Yes"),
+         .by = c("Site", "Order_Family"))
+  
+AnnualFlux_Dataset_Gapfilled_SE<-monthly_AveConc_Final_NDHD %>% 
+  distinct(Site, Order_Family, date, Analyte_Short, Monthly_Loading_TaxaSite_ug_SE) %>% 
+  pivot_wider(names_from = "Analyte_Short", values_from = "Monthly_Loading_TaxaSite_ug_SE") %>% 
+  full_join(select(tree_data_emerge, -c(Order, imputed_data, FamilySite_E_AFDM_mgperm2))) %>% 
+  rename(imputed_AFDM_mgperm2_SE = imputed_data_SE) %>%
+  arrange(Site, Order_Family, date) %>%
+  filter(!is.na(imputed_AFDM_mgperm2_SE)) %>% 
+  mutate(across(metals_for_full_analysis, ~ ifelse(FamilySite_E_AFDM_mgperm2_SE == 0, 0, .)),
+         across(metals_for_full_analysis, ~ na_interpolation(.x, option="linear")),
+         Sampling_Date_TF = if_else(is.na(FamilySite_E_AFDM_mgperm2_SE), "No", "Yes"),
+         .by = c("Site", "Order_Family"))
+
+```
+
+# Calculated Values
+
+# 1. Annual Flux of Biomass and Metals
+
+## Annual Emergence
+
+```{r}
+Annual_emergence_wSE<-tree_data_emerge %>% 
+  summarize(Total_emergence = sum(imputed_data), 
+            Total_emergence_SE = sum(imputed_data_SE),
+            .by = c("Site", "Order_Family")) %>% 
+  filter(Total_emergence > 0) %>% 
+  mutate(across(is.numeric, signif, 3)) %>% 
+  mutate(Emergence_AFDM_mgperm2 = paste0(Total_emergence, " +/- ", Total_emergence_SE))
+```
+
+## Annual Metals Flux
+
+```{r}
+Flux_metals_annual<-AnnualFlux_Dataset_Gapfilled %>%
+  select(Site, Order_Family, Cr, Ni, Cu, Zn, Se, Pb) %>% 
+  pivot_longer(names_to = "Metal", values_to = "Flux", metals_for_full_analysis) %>% 
+  summarize(Metal_flux_annual_OF = sum(Flux), .by = c("Site", "Order_Family", "Metal"))
+
+Flux_metals_annual_SE<-AnnualFlux_Dataset_Gapfilled_SE %>%
+  select(Site, Order_Family, Cr, Ni, Cu, Zn, Se, Pb) %>% 
+  pivot_longer(names_to = "Metal", values_to = "Flux_SE", metals_for_full_analysis) %>% 
+  summarize(Metal_flux_annual_OF_SE = sum(Flux_SE), .by = c("Site", "Order_Family", "Metal"))
+
+Flux_metals_annual_complete<-full_join(Flux_metals_annual, Flux_metals_annual_SE)
+
+rm(Flux_metals_annual, Flux_metals_annual_SE)
+```
+
+# 2. Metal Exposure: Water and Food Resources
+
+## Water 
+
+### Detection frequency
+
+Overall 
+
+```{r}
+Water_Conc %>% 
+  count(Quantification, Analyte_Short) %>% 
+  pivot_wider(names_from = "Quantification", values_from = "n") %>% 
+  replace(is.na(.), 0) %>%
+  mutate(Detection_Percent = round(100*`Above Quant`/(`Above Quant` + `Below Quant`))) %>% 
+  arrange(Detection_Percent) %>% 
+  datatable()
+```
+
+By Site 
+
+```{r}
+Water_Conc %>% 
+  count(Quantification, SITE, Analyte_Short) %>% 
+  pivot_wider(names_from = "Quantification", values_from = "n") %>% 
+  replace(is.na(.), 0) %>%
+  mutate(total = `Above Quant` + `Below Quant`, 
+         Detection_Percent = round(100*`Above Quant`/total)) %>% 
+  arrange(Analyte_Short, SITE) %>% 
+  datatable()
+```
+
+### Stats
+
+```{r}
+test<-list()
+
+for(j in 1:length(metals_for_full_analysis)){
+   
+    data_i<-Water_Conc %>% 
+      filter(Concentration_ugperL_NonDetect_as_0 > 0) %>% 
+      filter(Analyte_Short == metals_for_full_analysis[j]) %>% 
+      distinct(SITE, Analyte_Short, Concentration_ugperL_NonDetect_as_0)
+    
+    p_values <- compare_means(Concentration_ugperL_NonDetect_as_0 ~ SITE, 
+                              data = data_i, method = "wilcox.test",
+                              symnum.args = list(cutpoints = c(0, 0.01, 0.05, 0.1, Inf),
+                                            symbols = c("**", "*", "+", "ns")))
+    
+    # Extracting test statistics for each comparison
+    test_stats <- sapply(1:nrow(p_values), function(i) {
+      group1 <- p_values$group1[i]
+      group2 <- p_values$group2[i]
+      test <- wilcox.test(data_i$Concentration_ugperL_NonDetect_as_0[data_i$SITE == group1], 
+                          data_i$Concentration_ugperL_NonDetect_as_0[data_i$SITE == group2])
+      return(test$statistic)
+    })
+    
+    names(test_stats) <- paste(p_values$group1, p_values$group2, sep = "-")
+    p_values$statistic <- test_stats
+    
+    names(p_values$p) <- paste(p_values$group1, p_values$group2, sep = "-")
+    
+    test[[j]]<-p_values %>% 
+      mutate(Analyte_Short = metals_for_full_analysis[j])
+    }
+
+p_results_water<- test %>%
+  bind_rows()
+
+p_results_water  %>%
+  mutate(p = round(p, 4)) %>% 
+  select(group1, group2, p, p.signif, method, statistic, Analyte_Short) %>% 
+  datatable()
+```
+
+## Food Resources 
+
+### Detection frequency
+
+```{r}
+data_ZeroasND_samples %>%
+  filter(str_detect(Type_Specimen,"oots|film")) %>% 
+  count(Quantification, Analyte_Short) %>% 
+  pivot_wider(names_from = "Quantification", values_from = "n") %>% 
+  replace(is.na(.), 0) %>%
+  mutate(Detection_Percent = round(100*`Above Quant`/(`Above Quant` + `Below Quant`))) %>% 
+  arrange(Detection_Percent) %>% 
+  datatable()
+
+```
+
+### Stats
+
+```{r}
+test2<-list()
+metals_for_full_analysis_noSe<-c("Zn", "Cu", "Cr", "Pb", "Ni")
+
+for(j in 1:length(metals_for_full_analysis_noSe)){
+   
+    data_i<-data_ZeroasND_samples %>% 
+      filter(Quantification == "Above Quant") %>% 
+      filter(str_detect(Type_Specimen,"oots|film")) %>% 
+      filter(Analyte_Short == metals_for_full_analysis_noSe[j]) %>% 
+      distinct(SITE, Analyte_Short, Concentration_mgperkg_NonDetect_as_0)
+    
+    p_values <- compare_means(Concentration_mgperkg_NonDetect_as_0 ~ SITE, 
+                              data = data_i, method = "wilcox.test",
+                              symnum.args = list(cutpoints = c(0, 0.01, 0.05, 0.1, Inf),
+                                            symbols = c("**", "*", "+", "ns")))
+    
+    # Extracting test statistics for each comparison
+    test_stats <- sapply(1:nrow(p_values), function(i) {
+      group1 <- p_values$group1[i]
+      group2 <- p_values$group2[i]
+      test <- wilcox.test(data_i$Concentration_mgperkg_NonDetect_as_0[data_i$SITE == group1], 
+                          data_i$Concentration_mgperkg_NonDetect_as_0[data_i$SITE == group2])
+      return(test$statistic)
+    })
+    
+    names(test_stats) <- paste(p_values$group1, p_values$group2, sep = "-")
+    p_values$statistic <- test_stats
+    
+    names(p_values$p) <- paste(p_values$group1, p_values$group2, sep = "-")
+    
+    test2[[j]]<-p_values %>% 
+      mutate(Analyte_Short = metals_for_full_analysis_noSe[j])
+    }
+
+p_results_Food<- test2 %>%
+  bind_rows() 
+
+p_results_Food %>%
+  mutate(p = round(p, 4)) %>% 
+  select(group1, group2, p, p.signif, method, statistic, Analyte_Short) %>% 
+  datatable()
+```
+
+Count of Samples 
+
+```{r}
+data_ZeroasND_samples %>% 
+  filter(Quantification == "Above Quant") %>% 
+  filter(str_detect(Type_Specimen,"oots|film")) %>% 
+  count(Analyte_Short, SITE) %>% 
+  pivot_wider(names_from = "SITE", values_from = "n") %>% 
+  datatable()
+```
+
+# 3. Insect Metals Loading Statistics
+
+## Chironomidae Metals Range
+
+```{r}
+data_ZeroasND_samples %>%
+  filter(Order_Family == "diptera_chironomidae") %>% 
+  filter(Analyte_Short == "Zn") %>% 
+  summarize(min = min(Concentration_mgperkg_NonDetect_as_0), 
+            max = max(Concentration_mgperkg_NonDetect_as_0), 
+            median = median(Concentration_mgperkg_NonDetect_as_0),
+            count = n(),
+            .by = c("SITE")) %>% 
+  mutate(across(is.numeric, round)) %>% 
+  datatable()
+```
+
+## Frequency of Detection: Insects
+
+All Sites
+
+```{r}
+data_ZeroasND_samples %>%
+  # filter for only the insects
+  filter(!str_detect(Specimen, "biofilm|Tetra")) %>% 
+  group_by(Analyte_Short) %>% 
+  count(Quantification) %>% 
+  pivot_wider(names_from = "Quantification", values_from = "n") %>% 
+  replace(is.na(.), 0) %>% 
+  mutate(Detection_Percent = round(100*`Above Quant`/(`Above Quant` + `Below Quant`))) %>% 
+  arrange(Detection_Percent) %>% 
+  datatable()
+```
+
+By Site
+
+```{r}
+monthly_NDHD %>% 
+  group_by(SITE, Analyte_Short) %>% 
+  count(Quantification) %>% 
+  pivot_wider(names_from = "Quantification", values_from = "n") %>% 
+  replace(is.na(.), 0) %>% 
+  mutate(Detection_Percent = round(100*`Above Quant`/(`Above Quant` + `Below Quant`))) %>% 
+  arrange(Analyte_Short, SITE, Detection_Percent) %>% 
+  datatable()
+```
+
+# Table 1. Annual Flux
+
+Biomass: Annual by Site and Taxa
+
+```{r}
+Annual_emergence_wSE %>% 
+  select(Site, Order_Family, Emergence_AFDM_mgperm2) %>% 
+  datatable()
+```
+
+Biomass: Annual by Site
+
+```{r}
+Annual_emergence_wSE %>% 
+  summarize(Total_emergence = sum(Total_emergence),
+            Total_emergence_SE = sum(Total_emergence_SE), 
+            .by = "Site") %>% 
+  mutate(across(is.numeric, signif, 3)) %>% 
+  mutate(Emergent_Biomass_Annual = paste0(Total_emergence, " +/- ", Total_emergence_SE),
+         .keep = "unused") %>% 
+  datatable()
+```
+
+Metals: Annual by Site
+
+```{r}
+Flux_metals_annual_complete %>% 
+  summarize(Site_Metal_Flux_Annual = sum(Metal_flux_annual_OF), 
+            Site_Metal_Flux_Annual_SE = sum(Metal_flux_annual_OF_SE),
+            .by = c("Site", "Metal")) %>% 
+  mutate(flux_with_SE = paste0(round(Site_Metal_Flux_Annual,2), " +/- ",
+                                  round(Site_Metal_Flux_Annual_SE,2))) %>% 
+  mutate(flux_with_SE = if_else(str_detect(flux_with_SE, "0 \\+/\\- 0"), 
+                                   "<MDL", flux_with_SE)) %>% 
+  select(Site, Metal, flux_with_SE) %>% 
+  pivot_wider(names_from = "Metal", values_from = "flux_with_SE")  %>% 
+  select(Site, Zn, Cu, Se)  %>% 
+  datatable()
+```
+
+Metals: Annual by Site and Taxa
+
+```{r}
+Flux_metals_annual_complete %>% 
+  filter(Metal_flux_annual_OF > 0) %>% 
+  mutate(flux_with_OF_SE = paste0(round(Metal_flux_annual_OF,2), " +/- ",
+                                  round(Metal_flux_annual_OF_SE,2))) %>% 
+  mutate(flux_with_OF_SE = if_else(str_detect(flux_with_OF_SE, "0 \\+/\\- 0"), 
+                                   "<MDL", flux_with_OF_SE)) %>% 
+  select(Site, Order_Family, Metal, flux_with_OF_SE) %>% 
+  pivot_wider(names_from = "Metal", values_from = "flux_with_OF_SE")  %>% 
+  select(Site, Order_Family, Zn, Cu, Se)  %>% 
+  datatable()
+```
+
+# Fig 2. Annual Emergence and Metal Flux
+
+## Biomass
+
+```{r fig.height=4, fig.width=6}
+p_biomass_annual<-tree_data_emerge %>%
+  filter(date >= start_date & date <= end_date) %>% 
+ # mutate(SITE = case_when(SITE == "Stormwater" ~ "SW", 
+  #                        SITE == "Wastewater" ~ "WW", 
+   #                       SITE == "Forested" ~ "F")) %>% 
+  ggplot(aes(x = factor(SITE, c("Stormwater", "Wastewater", "Forested")), 
+             y= imputed_data, fill = Order_Family)) + 
+  geom_col() + 
+  scale_fill_manual(values = taxa_colors_dataset) + 
+  theme_pubr(legend = "none") + 
+  labs(y= expression("Biomass (AFDM mg " ~m^-2 ~yr^-1 ~")"), x=element_blank()) + 
+  theme(text = element_text(size = 12)) + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+```
+
+## Metals
+
+```{r}
+Annual_MetalFlux_Chopped_Up<-AnnualFlux_Dataset_Gapfilled %>%
+  select(SITE, Order_Family,date, metals_for_full_analysis) %>%
+  pivot_longer(names_to = "Analyte_Short", values_to = "flux", metals_for_full_analysis) %>% 
+#  filter(date >= as.Date("2021-04-29") & date <= as.Date("2022-04-13")) %>%
+  summarize(total_metalsflux = sum(flux, na.rm = T),
+            .by = c("SITE", "Order_Family", "Analyte_Short"))
+
+Annual_MetalFluxBiomass_Chopped_Up<-AnnualFlux_Dataset_Gapfilled %>%
+  select(SITE, Order_Family,date, metals_for_full_analysis, imputed_AFDM_mgperm2) %>%
+  pivot_longer(names_to = "Analyte_Short", values_to = "flux",
+               c(metals_for_full_analysis, imputed_AFDM_mgperm2)) %>% 
+  summarize(total_flux = sum(flux, na.rm = T),
+            .by = c("SITE", "Order_Family", "Analyte_Short"))
+```
+
+```{r fig.height=3, fig.width=6}
+p_bars_annualmetalsflux<-Annual_MetalFlux_Chopped_Up %>% 
+  filter(str_detect(Analyte_Short, "Zn|Cu|Se")) %>% 
+  mutate(Analyte_Short = case_when(Analyte_Short == "Zn" ~ "Zn - Zinc",
+                                   Analyte_Short == "Cu" ~ "Cu - Copper",
+                                   Analyte_Short == "Se" ~ "Se - Selenium")) %>% 
+ # mutate(SITE = case_when(SITE == "Stormwater" ~ "SW", 
+   #                       SITE == "Wastewater" ~ "WW", 
+    #                      SITE == "Forested" ~ "F")) %>% 
+  mutate(SITE = factor(SITE, c("Stormwater", "Wastewater", "Forested"))) %>% 
+  ggplot(aes(x = SITE, y= total_metalsflux, fill = Order_Family)) +
+  geom_col(position = "stack") + 
+  facet_wrap(~factor(Analyte_Short, levels = c("Zn - Zinc", "Cu - Copper", "Se - Selenium")), 
+             strip.position = "left", scales = "free_y", ncol = 3) + 
+  scale_fill_manual(values = taxa_colors_dataset) +
+  theme_pubr(legend = "none") + 
+  labs(y= expression("Metal Flux ( " *mu*"g" ~m^-2 ~ "yr"^-1 ~")"), 
+       x=element_blank()) + 
+  theme(text = element_text(size = 12), strip.background = element_rect(fill = "transparent"))+ 
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+```
+
+## Combined
+
+```{r fig.height = 4, fig.width=8}
+ggarrange(p_biomass_annual, p_bars_annualmetalsflux, legend = "none", 
+          labels = "AUTO", widths = c(1,3), align = "hv")
+```
+
+# Fig 3. Concentrations by Taxa
+
+```{r}
+metals_3<-c("Zn", "Cu", "Se")
+
+common_taxa<-c("Chironomidae", "Baetidae",
+                "Hydropsychidae", "Hydroptilidae")
+
+two_taxa<-c("Chironomidae", "Baetidae")
+```
+
+```{r}
+conc_figs<-list()
+
+ for(i in 1:length(metals_3)){
+   
+   data<-data_ZeroasND_samples %>%
+     mutate(month = month(date)) %>% 
+     filter(!str_detect(Specimen, "biofilm|Tetra")) %>%  
+     filter(Concentration_mgperkg_NonDetect_as_0 > 0) %>% 
+     filter(Analyte_Short == metals_3[i]) %>% 
+     mutate(Names = case_when(str_detect(Order_Family, "chiron") ~ "Chironomidae",
+                              str_detect(Order_Family, "baet") ~ "Baetidae",
+                              str_detect(Order_Family, "psych") ~ "Hydropsychidae",
+                              str_detect(Order_Family, "dropt") ~ "Hydroptilidae"),
+            Site = SITE) %>% #case_when(SITE == "Forested" ~ "Forested",
+                             #SITE == "Stormwater" ~ "Stormw",
+                             #SITE == "Wastewater" ~ "WW")) %>% 
+     filter(!is.na(Names))
+   
+   list_taxa<-list()
+   
+   for(j in 1:length(common_taxa)){
+ 
+     cld_input<-data %>%
+       filter(Names == common_taxa[[j]]) 
+     
+     p_values <- compare_means(Concentration_mgperkg_NonDetect_as_0 ~ Site, 
+                               data = cld_input, method = "wilcox.test")
+     
+     names(p_values$p) <- paste(p_values$group1, p_values$group2, sep = "-")
+ 
+     cld <- multcompLetters(p_values$p, threshold = 0.1)
+     
+     cld_j<- as.data.frame(cld$Letters) %>% 
+       rename(cld = 1) %>%
+       rownames_to_column(var = "Site") %>%
+       mutate(Names = common_taxa[j])
+ 
+     list_taxa[[j]]<-cld_j
+   }
+   
+   cld_results <- list_taxa %>%
+     bind_rows()
+   
+   p<-data %>% 
+     ggplot(aes(y=Concentration_mgperkg_NonDetect_as_0, 
+                x = Site)) + 
+     geom_boxplot(aes(color = SITE), outlier.colour = "transparent") +
+     geom_point(aes(color = SITE),
+                position=position_jitterdodge(), alpha = 0.4, width = 0.2) +
+     geom_text(data = cld_results, aes(x = Site,
+                 y = 0.1, label = cld)) +
+     facet_wrap(~Names, ncol = 4) +
+     scale_color_manual(values = pal_sites) + 
+     theme_pubr(legend = "none") +
+     labs(y = bquote(.(metals_3[i]) ~ "(mg" ~ kg^-1 ~ ")")) + 
+     theme(axis.title.x = element_blank())
+     
+   print(cld_results)
+   conc_figs[[i]]<-p
+   
+ }
+
+```
+
+```{r fig.height=7, fig.width = 8}
+ ggarrange(conc_figs[[1]] + theme(axis.text.x = element_blank()), 
+           conc_figs[[2]] + theme(axis.text.x = element_blank()), 
+           conc_figs[[3]] + theme(axis.text.x=element_text(angle = 45, 
+                                                           vjust = 1, hjust=1)),
+          align = "v", ncol = 1, heights = c(1,1,1.3), labels = c("A.", "B.", "C."))
+```
+
+```{r}
+data_ZeroasND_samples %>%
+    filter(Concentration_mgperkg_NonDetect_as_0 > 0) %>% 
+    filter(str_detect(Analyte_Short,"Cu|Zn|Se")) %>%
+    filter(str_detect(Order_Family,"bae|chiron|hydr")) %>%
+    full_join(short_names) %>% 
+    filter(!is.na(Short_Order_Family)) %>% 
+  count(SITE, Order_Family, Analyte_Short) %>% 
+  datatable()
+```
+
+## Compared across sites
+
+```{r}
+P_results_all_sites<-list()
+
+for(i in 1:length(metals_3)){
+
+  data<-data_ZeroasND_samples %>%
+    filter(Concentration_mgperkg_NonDetect_as_0 > 0) %>%
+    filter(Analyte_Short == metals_3[i]) %>%
+    mutate(Names = case_when(str_detect(Order_Family, "chiron") ~ "Chironomidae",
+                             str_detect(Order_Family, "baet") ~ "Baetidae",
+                             str_detect(Order_Family, "psych") ~ "Hydropsychidae",
+                             str_detect(Order_Family, "dropt") ~ "Hydroptilidae"),
+           Site = case_when(SITE == "Forested" ~ "F",
+                            SITE == "Stormwater" ~ "SW",
+                            SITE == "Wastewater" ~ "WW")) %>%
+    filter(!is.na(Names))
+
+  list_taxa<-list()
+
+  data_stats<-data %>% 
+    mutate(Count = n(), .by = c("Order_Family", "Site")) %>% 
+    filter(Count >= 3)
+  
+  list_taxa<-list()
+  list_taxa_p<-list()
+  
+  # mimic wilcox test (from stat_compare_means function), but with 
+  # compact letter display rather than symbols
+  
+  for(j in 1:length(two_taxa)){
+    cld_input<-data_stats %>%
+      filter(Names == two_taxa[[j]])
+    
+    p_values <- compare_means(Concentration_mgperkg_NonDetect_as_0 ~ Site, 
+                              data = cld_input, method = "wilcox.test",
+                              symnum.args = list(cutpoints = c(0, 0.01, 0.05, 0.1, Inf),
+                                            symbols = c("**", "*", "+", "ns")))
+    
+    # Extracting test statistics for each comparison
+    test_stats <- sapply(1:nrow(p_values), function(i) {
+      group1 <- p_values$group1[i]
+      group2 <- p_values$group2[i]
+      test <- wilcox.test(cld_input$Concentration_mgperkg_NonDetect_as_0[cld_input$Site == group1], 
+                          cld_input$Concentration_mgperkg_NonDetect_as_0[cld_input$Site == group2])
+      return(test$statistic)
+    })
+    
+    names(test_stats) <- paste(p_values$group1, p_values$group2, sep = "-")
+    p_values$statistic <- test_stats
+    
+    names(p_values$p) <- paste(p_values$group1, p_values$group2, sep = "-")
+    
+    cld <- multcompLetters(p_values$p, threshold = 0.1)
+    
+    cld_j <- as.data.frame(cld$Letters) %>%
+      rename(cld = 1) %>%
+      rownames_to_column(var = "Site") %>%
+      mutate(Order_Family = two_taxa[j])
+    
+    list_taxa[[j]] <- cld_j
+    list_taxa_p[[j]]<-p_values %>% 
+      mutate(Order_Family = two_taxa[j])
+    }
+  
+  cld_results <- list_taxa %>%
+    bind_rows() 
+  
+  p_results <- list_taxa_p %>%
+    bind_rows() %>% 
+    mutate(Analyte_Short = metals_3[i])
+  
+  P_results_all_sites[[i]]<-p_results
+}
+```
+
+```{r}
+P_results_all_sites %>% 
+  bind_rows() %>% 
+  mutate(p = round(p, 4)) %>% 
+  select(-1) %>% 
+  arrange(Order_Family, Analyte_Short) %>%
+  select(group1, group2, p, p.signif, method, statistic, Order_Family, Analyte_Short) %>% 
+  datatable()
+```
+
+```{r}
+data_ZeroasND_samples %>%
+  filter(Concentration_mgperkg_NonDetect_as_0 > 0) %>%
+  filter(str_detect(Analyte_Short, "Zn|Cu|Se")) %>% 
+  filter(str_detect(Order_Family, "chiron|baet|psych|dropt")) %>% 
+  count(Analyte_Short, Order_Family, SITE) %>% 
+  datatable()
+
+```
+
+# Fig 4. Timeseries of Flux
+
+```{r}
+p_biomass_ts<-tree_data_emerge %>%
+  ggplot(aes(x = date, fill = Order_Family)) + 
+  geom_area(aes(y=imputed_data), alpha = 0.1) +
+  geom_col(aes(y= FamilySite_E_AFDM_mgperm2), width =2) + 
+  scale_fill_manual(values = taxa_colors_dataset) + 
+  theme_pubr(legend = "none") + 
+  facet_wrap(~factor(SITE, levels = c("Forested", "Wastewater", "Stormwater")),
+             ncol =1, strip.position = "left") + 
+  labs(y= expression("Biomass (AFDM mg " ~m^-2 ~day^-1 ~")"), x=element_blank()) + 
+  #scale_y_continuous(labels = label_scientific(digits = 2)) + 
+  theme(strip.background = element_rect(fill = "transparent"))
+
+p_biomass_ts
+```
+
+```{r}
+p_metalflux_ts_taxa<-AnnualFlux_Dataset_Gapfilled %>%
+  select(SITE, Order_Family,FamilySite_E_AFDM_mgperm2, date, metals_for_full_analysis) %>% 
+  mutate(Total_metals_for_full_analysis_Flux = rowSums(across(metals_for_full_analysis)),
+         .keep = "unused") %>% 
+  mutate(Sampling_Date_TotalTargetMetalFlux = if_else(is.na(FamilySite_E_AFDM_mgperm2), 
+                                                      NA, Total_metals_for_full_analysis_Flux)) %>% 
+  ggplot(aes(x = date, fill = Order_Family)) + 
+  geom_area(aes(y=Total_metals_for_full_analysis_Flux), alpha = 0.1) +
+  geom_col(aes(y= Sampling_Date_TotalTargetMetalFlux), width =2) + 
+  scale_fill_manual(values = taxa_colors_dataset) + 
+  theme_pubr(legend = "none") + 
+  facet_wrap(~factor(SITE, levels = c("Forested", "Wastewater", "Stormwater")),
+             ncol =1, strip.position = "left") + 
+  labs(y= expression("Metal Flux ( " *mu*"g" ~m^-2 ~ "day"^-1 ~")"), , x=element_blank()) + 
+ # scale_y_continuous(labels = label_scientific(digits = 2), limits = c(0, 0.003)) + 
+  theme(strip.background = element_rect(fill = "transparent"))
+
+p_metalflux_ts_taxa
+```
+
+```{r fig.height = 7, fig.width = 9}
+ggarrange(p_biomass_ts, p_metalflux_ts_taxa, ncol = 1, align = "hv", labels = "AUTO")
+```
+
+# Sup Table 1. Body Burden Metals Concentration, by Site and Emergent Adult Family
+
+```{r}
+t_families_concentration<-data_ZeroasND_samples %>%
+  # filter for only the insects
+  filter(!str_detect(Specimen, "biofilm|Tetra")) %>% 
+  filter(Analyte_Short %in% metals_for_full_analysis) %>% 
+  full_join(short_names) %>% 
+  filter(!is.na(Concentration_mgperkg_NonDetect_as_0)) %>% 
+  filter(!is.na(Short_Order_Family)) %>% 
+  summarize(count = n(), 
+            SE_conc = std.error(Concentration_mgperkg_NonDetect_as_0),
+            min_conc = min(Concentration_mgperkg_NonDetect_as_0), 
+            max_conc = max(Concentration_mgperkg_NonDetect_as_0),
+            median_conc = median(Concentration_mgperkg_NonDetect_as_0), 
+            .by = c("SITE", "Order_Family", "Analyte_Short")) %>% 
+  mutate(across(is.numeric, signif, 3)) %>% 
+  mutate(median_conc = if_else(median_conc == 0, "<MQL", as.character(median_conc)),
+         SE_conc = if_else(SE_conc == 0, "<MQL", as.character(SE_conc)),
+         min_conc = if_else(min_conc == 0, "<MQL", as.character(min_conc)),
+         max_conc = if_else(max_conc == 0, "<MQL", as.character(max_conc))) %>% 
+  mutate(Median_min_max = paste0(median_conc, " (", min_conc, "-", 
+                                 max_conc, ")")) %>% 
+  mutate(Order_Family = paste0(Order_Family, " (n=", count, ")")) %>% 
+  mutate(Median_min_max = if_else(str_detect(Median_min_max,"<MQL \\(<MQL-<MQL"), 
+                                  paste0("<MQL"), 
+                                  Median_min_max)) %>% 
+  select(-c(count:median_conc)) %>% 
+  pivot_wider(names_from = "Analyte_Short", values_from = "Median_min_max") %>% 
+  arrange(SITE, Order_Family) %>% 
+  select(SITE, Order_Family, Zn, Cu, Se, Cr, Ni, Pb)
+
+t_families_concentration %>% 
+  datatable()
+```
+
+# Sup Fig 1. Abundance and Mass Distribution
+
+```{r fig.width = 6, fig.height = 4.5}
+sizes<-Float_data %>% 
+  summarize(SiteTaxa_AFDM = sum(AFDM.mg), 
+            SiteTaxa_Count = sum(Sum_Count), 
+            SiteTaxa_IndividualMass = SiteTaxa_AFDM/SiteTaxa_Count,
+            .by = c("Site", "Order_Family", "Order")) 
+
+p_sizecount<-sizes %>% 
+  ggplot(aes(x=SiteTaxa_IndividualMass, y=SiteTaxa_Count, color = Site, fill = Site)) +
+  geom_point(size = 3) + 
+  geom_smooth(method='lm', alpha = 0.15) +
+  scale_color_manual(values = pal_sites) + 
+  scale_fill_manual(values = pal_sites) + 
+  scale_y_log10() + scale_x_log10() +
+  theme_pubr(legend = "none") + 
+  labs(x="Average Individual Mass (mg AFDM)", y="Count of Individuals in Family") + 
+  theme(legend.direction = "horizontal",
+        text = element_text(size = 20))
+
+p_sizecount
+
+```
+
+# Sup Fig 2. Metal Exposure by Water and Diet
+
+```{r fig.width = 4, fig.height=6}
+comparisons = list(c("Stormwater", "Wastewater"), c("Wastewater", "Forested"), c("Stormwater", "Forested") )
+
+p_water_concs_2<-Water_Conc %>% 
+  filter(Concentration_ugperL_NonDetect_as_0 > 0) %>% 
+  ggplot(aes(x = SITE, y=Concentration_ugperL_NonDetect_as_0, color = SITE)) + 
+  geom_boxplot(outlier.alpha = 0) + 
+  geom_jitter(width = 0.3, alpha = 0.3) + 
+  facet_wrap(~factor(Analyte_Short, 
+                     levels = c("Zn", "Cu", "Se", "Pb", "Ni", "Cr")), 
+             scales = "free_y", ncol = 1, strip.position = "left") + 
+  theme_pubr(legend = "none") + 
+  scale_y_continuous(trans = "log10", labels = scales::comma) + 
+  scale_color_manual(values = pal_sites) + 
+  stat_compare_means(comparisons = comparisons, method = "wilcox.test", label = "p.signif",
+                       symnum.args = list(cutpoints = c(0, 0.01, 0.05, 0.1, Inf),
+                                            symbols = c("**", "*", "+", "ns")),
+                       vjust = 0.3) +
+  labs(x = "Unfiltered Water", 
+       y= expression("Concentration ( " *mu*"g" ~ L^-1 ~")")) + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1), 
+        axis.text.y = element_blank(), axis.ticks.y = element_blank()) + 
+  coord_flip()
+
+p_water_concs_2
+```
+
+```{r fig.width = 4, fig.height=6}
+shapes_food<-c(8, 17)
+names(shapes_food)<-c("biofilm","submerged roots")
+
+p_food_combo_2<-data_ZeroasND_samples %>%
+  filter(Quantification == "Above Quant") %>% 
+  filter(str_detect(Type_Specimen,"oots|film")) %>% 
+  mutate(SITE = factor(SITE, levels=c("Stormwater", "Wastewater", "Forested"))) %>% 
+  ggplot(aes(x = SITE, y=Concentration_mgperkg_NonDetect_as_0, color = SITE)) + 
+  geom_boxplot(outlier.color = "transparent") +
+  geom_jitter(aes(shape = Type_Specimen), width = 0.3, alpha = 0.9, size = 2) +
+  facet_wrap(~factor(Analyte_Short, 
+                     levels = c("Zn", "Cu", "Se", "Ni", "Cr","Pb" )), 
+             scales = "free_y", ncol = 1, strip.position = "left") + 
+  theme_pubr(legend = "none") + 
+  stat_compare_means(comparisons = comparisons, method = "wilcox.test", label = "p.signif",
+                       symnum.args = list(cutpoints = c(0, 0.01, 0.05, 0.1, Inf),
+                                            symbols = c("**", "*", "+", "ns")),
+                       vjust = 0.3) +
+  scale_color_manual(values = pal_sites, guide = "none") + 
+  scale_shape_manual(values = shapes_food) + 
+  labs(x = "Food Resources (Algae and Tree Roots)", 
+       y= expression("Concentration (mg " ~ kg^-1 ~")"), shape = "Food Type") +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1), 
+        axis.text.y = element_blank(), axis.ticks.y = element_blank()) + 
+  scale_y_continuous(trans = "log10", labels = scales::comma) + 
+  coord_flip()
+
+p_food_combo_2
+```
+
+## Combined Plot
+
+```{r fig.height = 6, fig.width = 6}
+ggarrange(p_water_concs_2, p_food_combo_2, ncol =2, align= "h", labels = "AUTO") + 
+  labs(y= "test")
+```
+
+# Sup Fig. S3
+
+```{r}
+BLM_input_data <- read_csv("data_processed/BLM-input-data.csv") %>% 
+  filter(!is.na(ph) & !is.na(`DOC mg/L`)) %>% 
+  filter(Concentration_ugperL_NonDetect_as_0 > 0) %>% 
+  select(date, `DOC mg/L`:ph) %>% 
+  distinct()
+```
+
+Non-Metal Inputs to BLM Toxicity Model
+
+```{r}
+BLM_input_data %>% 
+  rename(pH = ph, `Temperature (C)` = temp_c) %>%
+  mutate(Site = case_when(SITE == "Stormwater" ~ "SW", 
+                          SITE == "Wastewater" ~ "WW", 
+                          SITE == "Forested" ~ "F")) %>%   
+  pivot_longer(names_to = "Measure", values_to = "Value", 
+               c(`DOC mg/L`:`Cl mg/L`, `Temperature (C)`:pH)) %>% 
+  mutate(Measure = str_replace(Measure, "mg\\/L", "\\(mg\\/L\\)")) %>% 
+  ggplot(aes(x = Site, y = Value, color = SITE)) + 
+  geom_boxplot(outlier.colour = "transparent") +
+  geom_point(position=position_jitterdodge(), alpha = 0.6, width = 0.2) +
+  facet_wrap(~Measure, scales = "free_y") + 
+  scale_color_manual(values = pal_sites) +
+  theme_pubr(legend = "none") 
+
+```
+
+# Sup Fig 4.
+
+The CO.Mineral.Belt water will be excluded since it was filtered, while our 
+samples were unfiltered. 
+
+## Copper
+
+```{r}
+Cu_BLM<-read.xlsx("data_processed/BLM_output/Water_Cu_BLM-output.xlsx") %>% 
+  rename(Site = Site.Label, 
+         Chronic.hazard.quotient = Chronic.Toxic.Units_Full)%>% 
+  filter(Cu_Simple > 0.1) %>% 
+  filter(Site != "CO.Mineral.Belt")
+```
+
+```{r}
+Cu_stats_tox<-compare_means(Chronic.hazard.quotient ~ Site, 
+                              data = Cu_BLM, method = "wilcox.test")
+names(Cu_stats_tox$p) <- paste(Cu_stats_tox$group1, Cu_stats_tox$group2, sep = "-")
+
+Cu_cld_tox <- multcompLetters(Cu_stats_tox$p, threshold = 0.1)$Letters %>% 
+  as.data.frame() %>%
+  rename(cld = 1) %>%
+  rownames_to_column(var = "Site") %>%
+  mutate(Metal = "Cu")
+```
+
+```{r}
+Cu_stats_water<-compare_means(Cu_Simple ~ Site, 
+                              data = Cu_BLM, method = "wilcox.test")
+names(Cu_stats_water$p) <- paste(Cu_stats_water$group1, Cu_stats_water$group2, sep = "-")
+
+Cu_cld_water <- multcompLetters(Cu_stats_water$p, threshold = 0.1)$Letters %>% 
+  as.data.frame() %>%
+  rename(cld = 1) %>%
+  rownames_to_column(var = "Site") %>%
+  mutate(Metal = "Cu")
+```
+
+## Zinc
+
+```{r}
+Zn_BLM<-read.xlsx("data_processed/BLM_output/Water_Zn_BLM-output.xlsx") %>%
+  rename(Site = Site.Label,
+         Chronic.hazard.quotient = Chronic.Toxic.Units_Full)%>% 
+  filter(Zn_Simple > 0.1) %>% 
+  filter(Site != "CO.Mineral.Belt")
+```
+
+```{r}
+Zn_stats<-compare_means(Chronic.hazard.quotient ~ Site, 
+                              data = Zn_BLM, method = "wilcox.test")
+names(Zn_stats$p) <- paste(Zn_stats$group1, Zn_stats$group2, sep = "-")
+
+Zn_cld_tox <- multcompLetters(Zn_stats$p, threshold = 0.1)$Letters %>% 
+  as.data.frame() %>%
+  rename(cld = 1) %>%
+  rownames_to_column(var = "Site") %>%
+  mutate(Metal = "Zn")
+```
+
+```{r}
+Zn_stats_water<-compare_means(Zn_Simple ~ Site, 
+                              data = Zn_BLM, method = "wilcox.test")
+names(Zn_stats_water$p) <- paste(Zn_stats_water$group1, Zn_stats_water$group2, sep = "-")
+
+Zn_cld_water <- multcompLetters(Zn_stats_water$p, threshold = 0.1)$Letters %>% 
+  as.data.frame() %>%
+  rename(cld = 1) %>%
+  rownames_to_column(var = "Site") %>%
+  mutate(Metal = "Cu")
+```
+
+## Figures 
+
+```{r}
+pal_sites2<-c('#f7b482', '#50a2c9', '#007100')
+names(pal_sites2) <- c('Stormwater', 'Wastewater', 'Forested') 
+
+Tox_Cu<-Cu_BLM %>% 
+  ggplot(aes(y=Chronic.hazard.quotient, x = Site)) + 
+  geom_boxplot(aes(color = Site), outlier.colour = "transparent") +
+  geom_point(aes(color = Site),
+             position=position_jitterdodge(), alpha = 0.8, width = 0.2) +
+  geom_text(data = Cu_cld_tox, aes(x = Site,
+              y = 4, label = cld)) +
+  scale_color_manual(values = pal_sites2) + 
+  theme_pubr(legend = "none") +
+  labs(y = expression("Cu Chronic Hazard Quotient"), x="") + 
+  ylim(0, 4.5) + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+
+
+Tox_Zn<-Zn_BLM  %>% 
+  ggplot(aes(y=Chronic.hazard.quotient, x = Site)) + 
+  geom_boxplot(aes(color = Site), outlier.colour = "transparent") +
+  geom_point(aes(color = Site),
+             position=position_jitterdodge(), alpha = 0.8, width = 0.2) +
+  geom_text(data = Zn_cld_tox, aes(x = Site,
+              y = 2.25, label = cld)) +
+  scale_color_manual(values = pal_sites2) + 
+  theme_pubr(legend = "none") +
+  labs(y = expression("Zn Chronic Hazard Quotient"), x="") + 
+  ylim(0, 2.5) + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+
+Water_Cu<-Cu_BLM %>% 
+  ggplot(aes(y=Cu_Simple, x = Site)) + 
+  geom_boxplot(aes(color = Site), outlier.colour = "transparent") +
+  geom_point(aes(color = Site),
+             position=position_jitterdodge(), alpha = 0.8, width = 0.2) +
+  geom_text(data = Cu_cld_water, aes(x = Site,
+              y = 14, label = cld)) +
+  scale_color_manual(values = pal_sites2) + 
+  theme_pubr(legend = "none") +
+  labs(y = expression("Cu Water ("~mu~"g" ~ L^-1 ~")"), x="") + 
+  ylim(0,14)
+
+Water_Zn<-Zn_BLM  %>% 
+  ggplot(aes(y=Zn_Simple, x = Site)) + 
+  geom_boxplot(aes(color = Site), outlier.colour = "transparent") +
+  geom_point(aes(color = Site),
+             position=position_jitterdodge(), alpha = 0.8, width = 0.2) +
+  geom_text(data = Zn_cld_water, aes(x = Site,
+              y = 140, label = cld)) +
+  scale_color_manual(values = pal_sites2) + 
+  theme_pubr(legend = "none") +
+  labs(y = expression("Zn Water ("~mu~"g" ~ L^-1 ~")"), x="") + 
+  ylim(0, 140) 
+```
+
+```{r fig.width = 6, fig.height=4}
+ggarrange(Tox_Zn, Tox_Cu, ncol = 2, nrow = 1, labels = c("A.", "B."))
+```
+
+# Sup Fig 5. Metal Body Concentrations
+
+```{r}
+conc_figs_2<-list()
+P_results_all<-list()
+
+for(i in 1:length(metals_3)){
+  
+  data<-data_ZeroasND_samples %>%
+    mutate(month = month(date)) %>% 
+    # clean up data
+    filter(!str_detect(Specimen, "biofilm|Tetra")) %>%  
+    filter(Concentration_mgperkg_NonDetect_as_0 > 0) %>% 
+    filter(Analyte_Short == metals_3[i]) %>% 
+    full_join(short_names) %>% 
+    mutate(Site = case_when(SITE == "Forested" ~ "F",
+                            SITE == "Stormwater" ~ "SW",
+                            SITE == "Wastewater" ~ "WW")) %>% 
+    filter(!is.na(Short_Order_Family)) %>% 
+    filter(!is.na(Site))
+  
+  data_stats<-data %>% 
+    mutate(Count = n(), .by = c("Order_Family", "Site")) %>% 
+    filter(Count >= 3)
+  
+  list_taxa_2<-list()
+  list_taxa_p_2<-list()
+  
+  # mimic wilcox test (from stat_compare_means function), but with 
+  # compact letter display rather than symbols
+  
+  for (j in 1:length(sites)) {
+    cld_input <- data_stats %>%
+      filter(SITE == sites[[j]])
+    
+    p_values <- compare_means(Concentration_mgperkg_NonDetect_as_0 ~ Short_Order_Family, 
+                              data = cld_input, method = "wilcox.test",
+                              symnum.args = list(cutpoints = c(0, 0.01, 0.05, 0.1, Inf),
+                                            symbols = c("**", "*", "+", "ns")))
+    
+    # Extracting test statistics for each comparison
+    test_stats <- sapply(1:nrow(p_values), function(i) {
+      group1 <- p_values$group1[i]
+      group2 <- p_values$group2[i]
+      test <- wilcox.test(cld_input$Concentration_mgperkg_NonDetect_as_0[cld_input$Short_Order_Family == group1], 
+                          cld_input$Concentration_mgperkg_NonDetect_as_0[cld_input$Short_Order_Family == group2])
+      return(test$statistic)
+    })
+    
+    names(test_stats) <- paste(p_values$group1, p_values$group2, sep = "-")
+    p_values$statistic <- test_stats
+    
+    names(p_values$p) <- paste(p_values$group1, p_values$group2, sep = "-")
+    
+    cld <- multcompLetters(p_values$p, threshold = 0.1)
+    
+    cld_j <- as.data.frame(cld$Letters) %>%
+      rename(cld = 1) %>%
+      rownames_to_column(var = "Short_Order_Family") %>%
+      mutate(SITE = sites[j])
+    
+    list_taxa_2[[j]] <- cld_j
+    list_taxa_p_2[[j]]<-p_values
+    }
+
+  full_list<-count(data, SITE, Order_Family) %>% 
+    left_join(short_names) %>% 
+    select(-c(Order_Family, n))
+  
+  cld_results <- list_taxa_2 %>%
+    bind_rows() %>% 
+    full_join(full_list) %>%
+    mutate_all(~ ifelse(is.na(.), "~", .))
+  
+  p_results <- list_taxa_p_2 %>%
+    bind_rows() %>% 
+    mutate(Analyte_Short = metals_3[i])
+  
+  # Figure
+  p<-data %>% 
+    ggplot(aes(y=Concentration_mgperkg_NonDetect_as_0, 
+               x = Short_Order_Family)) + 
+    geom_boxplot(aes(color = Short_Order_Family), outlier.colour = "transparent") +
+    geom_point(aes(color = Short_Order_Family),
+               position=position_jitterdodge(), alpha = 0.4, width = 0.2) +
+    geom_text(data = cld_results, aes(x = Short_Order_Family,
+                y = 0.1, label = cld)) +
+    facet_grid(~SITE, scales = "free_x", space = "free") +
+    scale_color_manual(values = short_names_pal) + 
+    theme_pubr(legend = "none") +
+    labs(y = bquote(.(metals_3[i]) ~ "(mg" ~ kg^-1 ~ ")")) + 
+    theme(axis.title.x = element_blank())
+    
+  #print(cld_results)
+  conc_figs_2[[i]]<-p
+  P_results_all[[i]]<-p_results
+}
+```
+
+```{r fig.height=7, fig.width = 9}
+ggarrange(conc_figs_2[[1]] + theme(axis.text.x = element_blank()), 
+          conc_figs_2[[2]]+ theme(axis.text.x = element_blank()), 
+          conc_figs_2[[3]]+theme(axis.text.x = element_text(angle = 45, 
+                                                            vjust = 1, hjust=1)),
+          align = "v", ncol = 1, heights = c(1,1,1.25), labels = c("A.", "B.", "C."))
+```
+
+```{r}
+P_results_all<-P_results_all %>% 
+  bind_rows()
+
+P_results_all %>%
+  mutate(p = round(p, 4)) %>% 
+  select(group1, group2, p, p.signif, method, statistic, Analyte_Short) %>% 
+  datatable()
+```
